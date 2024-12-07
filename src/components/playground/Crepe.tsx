@@ -14,8 +14,18 @@ import { FC, MutableRefObject, useLayoutEffect, useRef } from "react";
 import { crepeAPI, markdown } from "./atom";
 import CustomButton from "./CustomButton";
 import FancyCodeRenderer from "./FancyCodeRenderer";
-import ReactDOMServer from "react-dom/server";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
+// Render custom components (like FancyEditor) inside markdown
+const renderCustomComponents = (markdown: string) => {
+  const customComponentRegex = /<FancyEditor\s*\/>/g;
+
+  // Return transformed markdown with placeholder for FancyEditor
+  return markdown.replace(customComponentRegex, () => {
+    return "<FancyEditorComponent />";
+  });
+};
 
 interface MilkdownProps {
   onChange: (markdown: string) => void;
@@ -29,43 +39,91 @@ const CrepeEditor: FC<MilkdownProps> = ({ onChange }) => {
   const toast = useToast();
   const content = useAtomValue(markdown);
   const setCrepeAPI = useSetAtom(crepeAPI);
+
+  // Insert custom components (like FancyEditor) during markdown updates
   const insertBoldText = (crepe: Crepe) => {
     crepe.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      const tr = view.state.tr.insertText("**Bold Text**");
-      view.dispatch(tr);
+
+      const { state, dispatch } = view;
+      const schema = state.schema;
+
+      // Find the bold mark in the schema
+      const boldMark = schema.marks.strong;
+
+      if (!boldMark) return;
+
+      const { from, to, empty } = state.selection;
+
+      if (empty) {
+        // If no text is selected, insert bold text
+        const tr = state.tr.insertText("Bold Text");
+        dispatch(tr.addMark(from, from + 9, boldMark.create())); // Apply bold mark to the inserted text
+      } else {
+        // If text is selected, toggle bold formatting
+        dispatch(state.tr.addMark(from, to, boldMark.create()));
+      }
+
+      toast("Inserted Bold Text", "success");
     });
-    toast("Inserted Bold Text", "success");
   };
+
+
 
   const insertLink = (crepe: Crepe) => {
     crepe.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      const tr = view.state.tr.insertText("[Link Text](https://example.com)");
-      view.dispatch(tr);
+      const { state, dispatch } = view;
+      const schema = state.schema;
+
+      // Create the link mark
+      const linkMark = schema.marks.link;
+      if (!linkMark) return;
+
+      const { from, to, empty } = state.selection;
+
+      if (empty) {
+        // Insert default link text
+        const tr = state.tr.insertText("Link Text");
+        dispatch(
+          tr.addMark(
+            from,
+            from + 9, // Length of "Link Text"
+            linkMark.create({ href: "https://example.com" })
+          )
+        );
+      } else {
+        // Apply the link to the selected text
+        dispatch(
+          state.tr.addMark(from, to, linkMark.create({ href: "https://example.com" }))
+        );
+      }
+
+      toast("Inserted Link", "success");
     });
-    toast("Inserted Link", "success");
   };
+
+
   const insertFancyCodeBlock = (crepe: Crepe) => {
     crepe.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      const tr = view.state.tr.insertText(
-        "```javascript\n// File: example.js\nconsole.log('Hello, Fancy Code!');\n```"
+      const { state, dispatch } = view;
+      const schema = state.schema;
+
+      // Find the code block node in the schema
+      const codeBlockNode = schema.nodes.code_block;
+      if (!codeBlockNode) return;
+
+      // Create a transaction to insert the code block
+      const tr = state.tr.replaceSelectionWith(
+        codeBlockNode.create({ language: "javascript" }, state.schema.text("// File: example.js\nconsole.log('Hello, Fancy Code!');"))
       );
-      view.dispatch(tr);
+
+      dispatch(tr);
+      toast("Inserted Fancy Code Block", "success");
     });
-    toast("Inserted Fancy Code Block", "success");
   };
 
-  const renderCode = (markdown: string) => {
-    const codeRegex = /```(\w+)?\n([\s\S]*?)```/g;
-
-    return markdown.replace(
-      codeRegex,
-      (_, language = "plaintext", code) =>
-        `<div>${ReactDOMServer.renderToStaticMarkup(<FancyCodeRenderer code={code.trim()} language={language} filePath="example.js" />)}</div>`
-    );
-  };
   useLayoutEffect(() => {
     if (!divRef.current || loading.current) return;
 
@@ -89,8 +147,8 @@ const CrepeEditor: FC<MilkdownProps> = ({ onChange }) => {
       .config((ctx) => {
         ctx.get(listenerCtx).markdownUpdated(
           throttle((_, markdown) => {
-            const renderedMarkdown = renderCode(markdown); // Transform markdown to include FancyCodeRenderer
-            onChange(renderedMarkdown);
+            const transformedMarkdown = renderCustomComponents(markdown);
+            onChange(transformedMarkdown);  // Pass transformed markdown
           }, 200)
         );
       })
@@ -148,18 +206,43 @@ const CrepeEditor: FC<MilkdownProps> = ({ onChange }) => {
     };
   }, [content, darkMode, onChange, setCrepeAPI, toast]);
 
-  return <div className="editor-container flex flex-col h-full">
-    <div className="toolbar flex gap-2 mb-4">
-      <CustomButton crepeRef={crepeRef} label="Bold" action={insertBoldText} />
-      <CustomButton crepeRef={crepeRef} label="Link" action={insertLink} />
-      <CustomButton
-        crepeRef={crepeRef}
-        label="Fancy Code Block"
-        action={insertFancyCodeBlock}
+  // Render markdown content with React components
+  const renderMarkdown = (markdown: string) => {
+    const transformedMarkdown = renderCustomComponents(markdown);
+
+    // Use ReactMarkdown to render custom components and markdown
+    return (
+      <ReactMarkdown
+        children={transformedMarkdown}
+        remarkPlugins={[remarkGfm]} // Enable GitHub-flavored markdown
+        components={{
+          FancyEditorComponent: () => <FancyCodeRenderer /> // Custom component for <FancyEditor />
+        }}
       />
+    );
+  };
+
+  return (
+    <div className="overflow-y-scroll h-full flex flex-col">
+      <div className=" flex gap-2 mb-4">
+        <CustomButton crepeRef={crepeRef} label="Bold" action={insertBoldText} />
+        <CustomButton crepeRef={crepeRef} label="Link" action={insertLink} />
+        <CustomButton
+          crepeRef={crepeRef}
+          label="Fancy Code Block"
+          action={insertFancyCodeBlock}
+        />
+      </div>
+      <div className="crepe flex h-full flex-1 flex-col" ref={divRef} />
     </div>
-    <div className="crepe-editor flex-1" ref={divRef} />
-  </div>;
+
+    // <div className="editor-container flex flex-col h-full">
+
+    /* <div className="markdown-preview">
+      {renderMarkdown(content)} 
+    </div> */
+    // </div>
+  );
 };
 
 export default CrepeEditor;
